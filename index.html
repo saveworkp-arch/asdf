@@ -111,8 +111,7 @@
                 class="w-full pl-10 pr-4 py-2.5 rounded-2xl border-2 border-rose-200 focus:outline-none focus:border-rose-400 font-medium">
             </div>
           </div>
-          <input type="hidden" id="gs-api-url" 
-            value="https://script.google.com/macros/s/AKfycbzkSjT52gGpOzY9UFI2xN_ZAvPAHJVC8SDunUWWxMJV1XIplwYWeZ8rFuoOIaVHwUL-dQ/exec">
+          <input type="hidden" id="gs-api-url" value="https://script.google.com/macros/s/AKfycbzBgGb0v8Q_PFpj0yKkMmNGabDuHjV7JZMoioWKCvxn2hyXn1U1aF5q3TaFLiIbSIDusA/exec">
           <button onclick="handleAuthSubmit()" id="btn-auth-submit"
             class="w-full bg-rose-500 hover:bg-rose-600 text-white font-bold py-3 px-4 rounded-2xl shadow-lg hover:shadow-xl transition transform active:scale-95 text-center mt-4">
             เข้าสู่ระบบเลย 🍓
@@ -163,15 +162,28 @@
             </button>
           </div>
 
+          <!-- ผู้เล่นออนไลน์ -->
+          <div class="border-t border-rose-100 pt-6">
+            <div class="flex justify-between items-center mb-3">
+              <h4 class="font-bold text-rose-900 flex items-center gap-1.5 text-md">
+                <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                ผู้เล่นออนไลน์ <span id="online-count-badge" class="ml-1 bg-emerald-100 text-emerald-700 text-[10px] font-bold px-2 py-0.5 rounded-full">0</span>
+              </h4>
+              <button onclick="refreshLobbyData()" class="text-xs text-rose-500 hover:underline flex items-center gap-1 font-semibold">
+                <i data-lucide="refresh-cw" class="w-3 h-3"></i> รีเฟรช
+              </button>
+            </div>
+            <div id="online-players-container" class="max-h-28 overflow-y-auto space-y-1.5 pr-1 mb-4">
+              <div class="text-center py-3 text-sm text-gray-400">กำลังโหลด...</div>
+            </div>
+          </div>
+
           <!-- รายชื่อห้อง -->
           <div class="border-t border-rose-100 pt-6">
             <div class="flex justify-between items-center mb-4">
               <h4 class="font-bold text-rose-900 flex items-center gap-1.5 text-md">
-                <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span> ห้องรอผู้เล่น
+                <span class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span> ห้องรอผู้เล่น
               </h4>
-              <button onclick="refreshRooms()" class="text-xs text-rose-500 hover:underline flex items-center gap-1 font-semibold">
-                <i data-lucide="refresh-cw" class="w-3 h-3"></i> รีเฟรช
-              </button>
             </div>
             <div id="room-list-container" class="max-h-48 overflow-y-auto space-y-2 pr-1">
               <div class="text-center py-6 text-sm text-gray-400">กำลังค้นหาห้อง...</div>
@@ -302,8 +314,10 @@
         { username: "🍅 มะเขือเทศเก๋า",     password: "123", wins: 15, losses: 10 },
         { username: "สตรอว์หวานฉ่ำ",          password: "123", wins: 8,  losses: 8 }
       ],
-      rooms: []
+      rooms: [],
+      onlinePlayers: {} // { username: lastSeenTimestamp }
     };
+    let lobbyPollingInterval = null;
     let currentUser     = null;
     let authMode        = "login";
     let isMusicPlaying  = false;
@@ -475,6 +489,28 @@
             const user = mockDB.users.find(u => u.username === payload.username);
             if (user) { if (payload.isWin) user.wins++; else user.losses++; }
             resolve({ status: "success" });
+          } else if (action === "heartbeat") {
+            // บันทึกว่าผู้เล่นยังออนไลน์
+            mockDB.onlinePlayers[payload.username] = Date.now();
+            resolve({ status: "success" });
+          } else if (action === "playerOffline") {
+            delete mockDB.onlinePlayers[payload.username];
+            resolve({ status: "success" });
+          } else if (action === "getOnlinePlayers") {
+            // ตัดผู้เล่นที่ไม่ส่ง heartbeat เกิน 15 วินาที
+            const now = Date.now();
+            Object.keys(mockDB.onlinePlayers).forEach(u => {
+              if (now - mockDB.onlinePlayers[u] > 15000) delete mockDB.onlinePlayers[u];
+            });
+            const list = Object.keys(mockDB.onlinePlayers).map(u => {
+              const userData = mockDB.users.find(x => x.username === u) || { wins: 0, losses: 0 };
+              // ตรวจสอบว่ากำลังเล่นอยู่ไหม
+              const inGame = mockDB.rooms.some(r =>
+                (r.creator === u || r.joiner === u) && r.status === "playing"
+              );
+              return { username: u, wins: userData.wins, losses: userData.losses, inGame };
+            });
+            resolve({ status: "success", players: list });
           }
         }, 200);
       });
@@ -498,8 +534,10 @@
       showScreen(screenId);
       if (screenId === "lobby-screen") {
         updateLobbyUI();
-        refreshLeaderboard();
-        refreshRooms();
+        refreshLobbyData();
+        startLobbyPolling();
+      } else {
+        stopLobbyPolling();
       }
     }
 
@@ -539,6 +577,8 @@
       if (response.status === "success") {
         if (authMode === "login") {
           currentUser      = response.data;
+          // บันทึกว่าผู้เล่นออนไลน์
+          await apiRequest({ action: "heartbeat", username: currentUser.username });
           msgBox.innerText = "เข้าสู่ระบบสำเร็จ!";
           msgBox.className = "mt-4 p-3 rounded-2xl text-center text-xs font-medium bg-emerald-100 text-emerald-700 block";
           playSoundEffect("victory");
@@ -557,6 +597,8 @@
     }
 
     function logout() {
+      if (currentUser) apiRequest({ action: "playerOffline", username: currentUser.username });
+      stopLobbyPolling();
       currentUser = null;
       document.getElementById("auth-username").value = "";
       document.getElementById("auth-password").value = "";
@@ -567,6 +609,58 @@
       if (!currentUser) return;
       document.getElementById("lobby-user-display").innerText = currentUser.username;
       document.getElementById("lobby-user-score").innerText   = `ชนะ ${currentUser.wins||0} แพ้ ${currentUser.losses||0}`;
+    }
+
+    async function refreshLobbyData() {
+      await Promise.all([refreshLeaderboard(), refreshRooms(), refreshOnlinePlayers()]);
+    }
+
+    function startLobbyPolling() {
+      stopLobbyPolling();
+      // ส่ง heartbeat และ refresh ทุก 8 วินาที
+      lobbyPollingInterval = setInterval(async () => {
+        if (activeScreen !== "lobby-screen") { stopLobbyPolling(); return; }
+        if (currentUser) await apiRequest({ action: "heartbeat", username: currentUser.username });
+        await Promise.all([refreshRooms(), refreshOnlinePlayers()]);
+      }, 8000);
+      // ส่ง heartbeat ครั้งแรกทันที
+      if (currentUser) apiRequest({ action: "heartbeat", username: currentUser.username });
+    }
+
+    function stopLobbyPolling() {
+      if (lobbyPollingInterval) { clearInterval(lobbyPollingInterval); lobbyPollingInterval = null; }
+    }
+
+    async function refreshOnlinePlayers() {
+      const container = document.getElementById("online-players-container");
+      const badge     = document.getElementById("online-count-badge");
+      const response  = await apiRequest({ action: "getOnlinePlayers" });
+      if (response.status === "success" && response.players) {
+        const players = response.players;
+        badge.innerText = players.length;
+        if (players.length === 0) {
+          container.innerHTML = '<div class="text-center py-3 text-sm text-gray-400">ยังไม่มีผู้เล่นออนไลน์</div>';
+          return;
+        }
+        container.innerHTML = "";
+        players.forEach(p => {
+          const isMe  = currentUser && p.username === currentUser.username;
+          const div   = document.createElement("div");
+          div.className = `flex items-center justify-between p-2 rounded-xl border ${isMe ? "bg-emerald-50 border-emerald-200" : "bg-rose-50/50 border-rose-100"}`;
+          const statusIcon = p.inGame
+            ? '<span class="text-[10px] bg-amber-100 text-amber-700 font-semibold px-1.5 py-0.5 rounded-full">กำลังเล่น ⚔️</span>'
+            : '<span class="text-[10px] bg-emerald-100 text-emerald-700 font-semibold px-1.5 py-0.5 rounded-full">ในล็อบบี้ 🍃</span>';
+          div.innerHTML = `
+            <div class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full ${p.inGame ? "bg-amber-400" : "bg-emerald-500"} animate-pulse flex-shrink-0"></span>
+              <span class="text-sm font-bold text-rose-900 truncate max-w-[120px]">${p.username}${isMe ? " (คุณ)" : ""}</span>
+            </div>
+            <div class="flex items-center gap-1.5 flex-shrink-0">
+              ${statusIcon}
+            </div>`;
+          container.appendChild(div);
+        });
+      }
     }
 
     async function refreshLeaderboard() {
